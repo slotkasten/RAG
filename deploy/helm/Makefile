@@ -241,6 +241,12 @@ help: ## Show this help message
 	@echo -e "  edit-config   - Edit configuration file"
 	@echo -e "  show-config   - Show current configuration"
 	@echo -e ""
+	@echo -e "$(GREEN)Kasten K10 Data Protection Targets:$(NC)"
+	@echo -e "  install-kasten       - Install Kasten K10 and deploy data protection config"
+	@echo -e "  uninstall-kasten     - Uninstall Kasten K10 and remove data protection config"
+	@echo -e "  kasten-set-profile   - Set the K10 Location Profile for off-cluster storage"
+	@echo -e "  kasten-status        - Show Kasten K10 deployment and policy status"
+	@echo -e ""
 	@echo -e "$(GREEN)Configuration:$(NC)"
 	@echo -e "  NAMESPACE     - Target namespace (required)"
 	@echo -e "  VALUES_FILE   - Configuration file (default: rag-values.yaml)"
@@ -695,3 +701,72 @@ delete-jobs: ## Delete all jobs in the namespace
 	@echo -e "$(BLUE)[INFO]$(NC) Deleting all jobs in namespace $(NAMESPACE)..."
 	@oc delete jobs -n $(NAMESPACE) --all ||:
 	@echo -e "$(GREEN)[SUCCESS]$(NC) Job deletion completed"
+
+# ── Kasten K10 data protection ────────────────────────────────────────────────
+KASTEN_NAMESPACE ?= kasten-io
+KASTEN_CHART := kasten-config
+KASTEN_CHART_DIR := kasten
+
+.PHONY: install-kasten
+install-kasten: check-deps ## Install Veeam Kasten K10 and configure data protection for the RAG application
+	@if [ -z "$(NAMESPACE)" ]; then echo -e "$(RED)[ERROR]$(NC) NAMESPACE is required for install-kasten"; exit 1; fi
+	@echo -e "$(BLUE)[INFO]$(NC) Adding Kasten Helm repository..."
+	@helm repo add kasten https://charts.kasten.io/ 2>/dev/null || true
+	@helm repo update
+	@echo -e "$(BLUE)[INFO]$(NC) Installing Veeam Kasten K10 in namespace $(KASTEN_NAMESPACE)..."
+	@helm upgrade --install k10 kasten/k10 \
+		--namespace $(KASTEN_NAMESPACE) \
+		--create-namespace \
+		--set auth.tokenAuth.enabled=true \
+		--set global.openshift.enabled=true
+	@echo -e "$(BLUE)[INFO]$(NC) Deploying Kanister blueprint and Kasten policy..."
+	@helm upgrade --install $(KASTEN_CHART) $(KASTEN_CHART_DIR) \
+		--namespace $(KASTEN_NAMESPACE) \
+		--set ragNamespace=$(NAMESPACE)
+	@echo -e "$(GREEN)[SUCCESS]$(NC) Kasten K10 installed successfully."
+	@echo -e ""
+	@echo -e "$(YELLOW)[NEXT STEPS]$(NC)"
+	@echo -e "  1. Retrieve your Kasten dashboard route:"
+	@echo -e "       oc get route k10 -n $(KASTEN_NAMESPACE)"
+	@echo -e "  2. Log in with your OpenShift token and create a Location Profile"
+	@echo -e "     (Settings > Locations) pointing to your backup storage."
+	@echo -e "  3. Associate the profile with the policy:"
+	@echo -e "       make kasten-set-profile NAMESPACE=$(NAMESPACE) LOCATION_PROFILE=<profile-name>"
+	@echo -e ""
+	@echo -e "$(YELLOW)[NOTE]$(NC) If the pgvectorSecretName default (pgvector-secret) does not match"
+	@echo -e "  your cluster, override it:"
+	@echo -e "       make install-kasten NAMESPACE=$(NAMESPACE) PGVECTOR_SECRET=<secret-name>"
+
+.PHONY: kasten-set-profile
+kasten-set-profile: ## Set the K10 Location Profile for the RAG backup policy (LOCATION_PROFILE=<name>)
+	@if [ -z "$(LOCATION_PROFILE)" ]; then echo -e "$(RED)[ERROR]$(NC) LOCATION_PROFILE is required"; exit 1; fi
+	@if [ -z "$(NAMESPACE)" ]; then echo -e "$(RED)[ERROR]$(NC) NAMESPACE is required"; exit 1; fi
+	@echo -e "$(BLUE)[INFO]$(NC) Updating Kasten policy location profile to '$(LOCATION_PROFILE)'..."
+	@helm upgrade $(KASTEN_CHART) $(KASTEN_CHART_DIR) \
+		--namespace $(KASTEN_NAMESPACE) \
+		--reuse-values \
+		--set ragNamespace=$(NAMESPACE) \
+		--set locationProfile=$(LOCATION_PROFILE)
+	@echo -e "$(GREEN)[SUCCESS]$(NC) Location profile updated to: $(LOCATION_PROFILE)"
+
+.PHONY: uninstall-kasten
+uninstall-kasten: ## Uninstall Kasten K10 and remove data protection configuration
+	@echo -e "$(BLUE)[INFO]$(NC) Removing Kasten data protection configuration..."
+	@helm -n $(KASTEN_NAMESPACE) uninstall $(KASTEN_CHART) 2>/dev/null || true
+	@echo -e "$(BLUE)[INFO]$(NC) Uninstalling Veeam Kasten K10..."
+	@helm -n $(KASTEN_NAMESPACE) uninstall k10 2>/dev/null || true
+	@echo -e "$(GREEN)[SUCCESS]$(NC) Kasten K10 uninstalled"
+
+.PHONY: kasten-status
+kasten-status: ## Show Kasten K10 deployment and policy status
+	@echo -e "$(BLUE)[INFO]$(NC) Kasten K10 pods in $(KASTEN_NAMESPACE):"
+	@oc get pods -n $(KASTEN_NAMESPACE) 2>/dev/null || true
+	@echo -e ""
+	@echo -e "$(BLUE)[INFO]$(NC) Kasten dashboard route:"
+	@oc get route k10 -n $(KASTEN_NAMESPACE) 2>/dev/null || true
+	@echo -e ""
+	@echo -e "$(BLUE)[INFO]$(NC) Kasten backup policies:"
+	@oc get policies.config.kio.kasten.io -n $(KASTEN_NAMESPACE) 2>/dev/null || true
+	@echo -e ""
+	@echo -e "$(BLUE)[INFO]$(NC) Kanister blueprints:"
+	@oc get blueprints.cr.kanister.io -n $(KASTEN_NAMESPACE) 2>/dev/null || true
